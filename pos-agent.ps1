@@ -1,9 +1,3 @@
-using namespace System.Net.WebSockets
-using namespace System.Text
-using namespace System.Threading
-using namespace System.IO
-using namespace System.Diagnostics
-
 # ================= CONFIG =================
 $WS_URL = "wss://anzs8ocgha.execute-api.eu-west-2.amazonaws.com/dev"
 $RESTAURANT_NUMBER = "12"
@@ -13,27 +7,21 @@ $MACHINE_NAME = "POS-01"
 # ================= GLOBAL STATE =================
 $global:Running = $true
 $global:WebSocket = $null
-$global:CTS = New-Object System.Threading.CancellationTokenSource
 
-# ================= JSON HELPERS =================
-
-function ConvertTo-JsonSafe {
-    param ([Hashtable]$Object)
-    return ($Object | ConvertTo-Json -Depth 10 -Compress)
-}
+# ================= JSON SEND =================
 
 function Send-JsonMessage {
     param ([Hashtable]$Object)
 
-    $json = ConvertTo-JsonSafe $Object
-    $bytes = [Encoding]::UTF8.GetBytes($json)
+    $json = $Object | ConvertTo-Json -Depth 10 -Compress
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes($json)
     $segment = New-Object System.ArraySegment[byte] -ArgumentList $bytes
 
     $global:WebSocket.SendAsync(
         $segment,
         [System.Net.WebSockets.WebSocketMessageType]::Text,
         $true,
-        $global:CTS.Token
+        [System.Threading.CancellationToken]::None
     ).Wait()
 }
 
@@ -48,7 +36,7 @@ function Start-Heartbeat {
                 device_id = $DEVICE_ID
                 timestamp = [int][double]::Parse((Get-Date -UFormat %s))
             }
-            Write-Host "Heartbeat sent at $(Get-Date -Format T)"
+            Write-Host "Heartbeat sent"
         }
         catch {
             Write-Warning "Heartbeat failed: $_"
@@ -71,19 +59,21 @@ function Run-ReceivedScript {
 
     try {
         $bytes = [Convert]::FromBase64String($EncodedScript)
-        $tempFile = [System.IO.Path]::ChangeExtension([System.IO.Path]::GetTempFileName(), ".ps1")
+        $tempFile = [System.IO.Path]::ChangeExtension(
+            [System.IO.Path]::GetTempFileName(),
+            ".ps1"
+        )
         [System.IO.File]::WriteAllBytes($tempFile, $bytes)
-
-        Write-Host "Running script $ScriptName ($tempFile)"
 
         $outFile = "$tempFile.out"
         $errFile = "$tempFile.err"
 
-        $process = Start-Process powershell `
+        $process = Start-Process powershell.exe `
             -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$tempFile`"" `
             -RedirectStandardOutput $outFile `
             -RedirectStandardError $errFile `
-            -NoNewWindow -PassThru
+            -NoNewWindow `
+            -PassThru
 
         if (-not $process.WaitForExit(60000)) {
             throw "Script execution timed out"
@@ -104,11 +94,8 @@ function Run-ReceivedScript {
             execution_status = if ($process.ExitCode -eq 0) { "success" } else { "failed" }
             timestamp = [int][double]::Parse((Get-Date -UFormat %s))
         }
-
-        Write-Host "Results sent to server"
     }
     catch {
-        Write-Error "Script execution error: $_"
         Send-JsonMessage @{
             action = "save_results"
             device_id = $DEVICE_ID
@@ -126,47 +113,45 @@ function Run-ReceivedScript {
     }
 }
 
-# ================= MESSAGE RECEIVER =================
+# ================= MESSAGE LOOP =================
 
 function Receive-Messages {
     $buffer = New-Object byte[] 4096
 
     while ($global:Running -and $global:WebSocket.State -eq 'Open') {
         $segment = New-Object System.ArraySegment[byte] -ArgumentList $buffer
-        $result = $global:WebSocket.ReceiveAsync($segment, $global:CTS.Token).Result
+        $result = $global:WebSocket.ReceiveAsync(
+            $segment,
+            [System.Threading.CancellationToken]::None
+        ).Result
 
         if ($result.MessageType -eq [System.Net.WebSockets.WebSocketMessageType]::Close) {
-            Write-Host "WebSocket closed by server"
             break
         }
 
-        $message = [Encoding]::UTF8.GetString($buffer, 0, $result.Count)
+        $message = [System.Text.Encoding]::UTF8.GetString($buffer, 0, $result.Count)
         Write-Host "Received: $message"
 
         try {
             $data = $message | ConvertFrom-Json
             if ($data.action -eq "run_script") {
-                Start-Job -ScriptBlock {
-                    param ($s, $c, $id)
-                    Run-ReceivedScript -ScriptName $s -EncodedScript $c -CommandId $id
-                } -ArgumentList $data.script_name, $data.script_content, $data.command_id | Out-Null
-            }
-            else {
-                Write-Host "Message action: $($data.action)"
+                Start-Job -ArgumentList $data.script_name, $data.script_content, $data.command_id `
+                    -ScriptBlock {
+                        param ($s, $c, $id)
+                        Run-ReceivedScript -ScriptName $s -EncodedScript $c -CommandId $id
+                    } | Out-Null
             }
         }
         catch {
-            Write-Warning "Failed to parse message: $_"
+            Write-Warning "Message parse error: $_"
         }
     }
 }
 
 # ================= CLEAN SHUTDOWN =================
 
-$shutdownHandler = {
-    Write-Host "Graceful shutdown started"
+Register-EngineEvent PowerShell.Exiting -Action {
     $global:Running = $false
-
     try {
         Send-JsonMessage @{
             action = "disconnect"
@@ -180,12 +165,7 @@ $shutdownHandler = {
         ).Wait()
     }
     catch {}
-    finally {
-        exit
-    }
-}
-
-Register-EngineEvent PowerShell.Exiting -Action $shutdownHandler | Out-Null
+} | Out-Null
 
 # ================= MAIN =================
 
@@ -197,7 +177,7 @@ $global:WebSocket.ConnectAsync(
     [System.Threading.CancellationToken]::None
 ).Wait()
 
-Write-Host "Connected to WebSocket server"
+Write-Host "Connected to WebSocket"
 
 Send-JsonMessage @{
     action = "register"
@@ -205,8 +185,6 @@ Send-JsonMessage @{
     device_id = $DEVICE_ID
     machine = $MACHINE_NAME
 }
-
-Write-Host "Registration message sent"
 
 Start-Job { Start-Heartbeat } | Out-Null
 Receive-Messages
