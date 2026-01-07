@@ -36,10 +36,8 @@ function Start-Heartbeat {
                 device_id = $DEVICE_ID
                 timestamp = [int][double]::Parse((Get-Date -UFormat %s))
             }
-            Write-Host "Heartbeat sent"
         }
         catch {
-            Write-Warning "Heartbeat failed: $_"
             break
         }
         Start-Sleep -Seconds 30
@@ -76,7 +74,7 @@ function Run-ReceivedScript {
             -PassThru
 
         if (-not $process.WaitForExit(60000)) {
-            throw "Script execution timed out"
+            throw "Timeout"
         }
 
         $stdout = Get-Content $outFile -Raw -ErrorAction SilentlyContinue
@@ -113,7 +111,7 @@ function Run-ReceivedScript {
     }
 }
 
-# ================= MESSAGE LOOP =================
+# ================= RECEIVE LOOP =================
 
 function Receive-Messages {
     $buffer = New-Object byte[] 4096
@@ -130,7 +128,6 @@ function Receive-Messages {
         }
 
         $message = [System.Text.Encoding]::UTF8.GetString($buffer, 0, $result.Count)
-        Write-Host "Received: $message"
 
         try {
             $data = $message | ConvertFrom-Json
@@ -142,13 +139,11 @@ function Receive-Messages {
                     } | Out-Null
             }
         }
-        catch {
-            Write-Warning "Message parse error: $_"
-        }
+        catch {}
     }
 }
 
-# ================= CLEAN SHUTDOWN =================
+# ================= SHUTDOWN =================
 
 Register-EngineEvent PowerShell.Exiting -Action {
     $global:Running = $false
@@ -160,7 +155,7 @@ Register-EngineEvent PowerShell.Exiting -Action {
         }
         $global:WebSocket.CloseAsync(
             [System.Net.WebSockets.WebSocketCloseStatus]::NormalClosure,
-            "Client shutdown",
+            "shutdown",
             [System.Threading.CancellationToken]::None
         ).Wait()
     }
@@ -172,12 +167,9 @@ Register-EngineEvent PowerShell.Exiting -Action {
 $uri = "$WS_URL?restaurantnumber=$RESTAURANT_NUMBER&deviceid=$DEVICE_ID&machine=$MACHINE_NAME"
 $global:WebSocket = New-Object System.Net.WebSockets.ClientWebSocket
 
-$global:WebSocket.ConnectAsync(
-    [Uri]$uri,
-    [System.Threading.CancellationToken]::None
-).Wait()
-
-Write-Host "Connected to WebSocket"
+# IMPORTANT: single-argument ConnectAsync (PS 5.1 safe)
+$connectTask = $global:WebSocket.ConnectAsync([Uri]$uri)
+$connectTask.Wait()
 
 Send-JsonMessage @{
     action = "register"
