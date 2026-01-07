@@ -191,7 +191,11 @@ Register-EngineEvent PowerShell.Exiting -Action $shutdownHandler | Out-Null
 
 $uri = "$WS_URL?restaurantnumber=$RESTAURANT_NUMBER&deviceid=$DEVICE_ID&machine=$MACHINE_NAME"
 $global:WebSocket = New-Object System.Net.WebSockets.ClientWebSocket
-$global:WebSocket.ConnectAsync([Uri]$uri, $global:CTS.Token).Wait()
+
+$global:WebSocket.ConnectAsync(
+    [Uri]$uri,
+    [System.Threading.CancellationToken]::None
+).Wait()
 
 Write-Host "Connected to WebSocket server"
 
